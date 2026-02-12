@@ -1,6 +1,6 @@
 {
   "name": "psych-scribe",
-  "version": "2.1.2",
+  "version": "2.2.0",
   "description": "Psychiatric documentation assistant for PMHNPs",
   "main": "main.js",
   "scripts": {
@@ -28,7 +28,10 @@
     "productName": "Psych Scribe",
     "mac": {
       "category": "public.app-category.medical",
-      "target": ["dmg", "zip"],
+      "target": [
+        "dmg",
+        "zip"
+      ],
       "icon": "icon.icns",
       "entitlements": "entitlements.mac.plist",
       "entitlementsInherit": "entitlements.mac.plist",
