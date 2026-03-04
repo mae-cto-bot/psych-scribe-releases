@@ -2,6 +2,11 @@
 // Psych Scribe v2 - Renderer
 // ============================================================
 
+// Fallback if sync.js didn't load
+if (typeof psSync === 'undefined') {
+  var psSync = { configure() {}, healthCheck() { return { ok: false }; }, syncNote() {} };
+}
+
 // DOM Elements
 const setupModal = document.getElementById('setup-modal');
 const apiKeyInput = document.getElementById('api-key-input');
@@ -15,9 +20,7 @@ const skipOpenAIBtn = document.getElementById('skip-openai-btn');
 
 // Recording Elements
 const recordBtn = document.getElementById('record-btn');
-const recordingIndicator = document.getElementById('recording-indicator');
-const recordingTime = document.getElementById('recording-time');
-const stopRecordBtn = document.getElementById('stop-record-btn');
+const importAudioBtn = document.getElementById('import-audio-btn');
 const transcribingIndicator = document.getElementById('transcribing-indicator');
 const siteSelect = document.getElementById('site-select');
 const typeSelect = document.getElementById('type-select');
@@ -41,8 +44,11 @@ const charCountSingle = document.getElementById('char-count-single');
 
 // PDF Attachment Elements
 const attachPdfBtn = document.getElementById('attach-pdf-btn');
+const attachPdfInputBtn = document.getElementById('attach-pdf-input-btn');
 const pdfAttachments = document.getElementById('pdf-attachments');
+const pdfAttachmentsInput = document.getElementById('pdf-attachments-input');
 const pdfList = document.getElementById('pdf-list');
+const pdfListInput = document.getElementById('pdf-list-input');
 
 // Guidelines Library Elements
 const guidelinesBtn = document.getElementById('guidelines-btn');
@@ -453,12 +459,78 @@ async function init() {
     console.warn('Sync init:', e.message);
   }
   
+  // Set version from package.json
+  try {
+    const version = await window.api.getVersion();
+    document.getElementById('app-version').textContent = `v${version}`;
+  } catch (e) {
+    document.getElementById('app-version').textContent = '';
+  }
+
   // Create initial session
   const session = createSession();
   activeSessionId = session.id;
   renderTabs();
   loadSessionState();
+
+  // Check for updates (non-blocking)
+  checkForAppUpdate();
 }
+
+// ============================================================
+// Auto-Update
+// ============================================================
+
+const updateBanner = document.getElementById('update-banner');
+const updateMessage = document.getElementById('update-message');
+const updateBtn = document.getElementById('update-btn');
+let pendingUpdate = null;
+
+async function checkForAppUpdate() {
+  try {
+    const update = await window.api.checkForUpdate();
+    if (update) {
+      pendingUpdate = update;
+      updateMessage.textContent = `Update available: ${update.version}`;
+      updateBanner.classList.remove('hidden');
+    }
+  } catch (e) {
+    console.log('Update check skipped:', e.message);
+  }
+}
+
+updateBtn.addEventListener('click', async () => {
+  if (!pendingUpdate) return;
+
+  updateBtn.disabled = true;
+  updateMessage.textContent = 'Downloading update...';
+
+  try {
+    const result = await window.api.installUpdate({
+      downloadUrl: pendingUpdate.downloadUrl,
+      version: pendingUpdate.version
+    });
+    if (!result.success) {
+      updateMessage.textContent = 'Update failed: ' + result.error;
+      updateBtn.disabled = false;
+      updateBtn.textContent = 'Retry';
+    }
+  } catch (e) {
+    updateMessage.textContent = 'Update failed: ' + e.message;
+    updateBtn.disabled = false;
+    updateBtn.textContent = 'Retry';
+  }
+});
+
+window.api.onUpdateProgress((status) => {
+  const messages = {
+    downloading: 'Downloading update...',
+    installing: 'Installing...',
+    relaunching: 'Relaunching...'
+  };
+  updateMessage.textContent = messages[status] || status;
+  updateBtn.classList.add('hidden');
+});
 
 saveKeyBtn.addEventListener('click', async () => {
   const key = apiKeyInput.value.trim();
@@ -500,8 +572,12 @@ function updateRecordButtonState() {
   if (hasOpenAIKey) {
     recordBtn.classList.remove('disabled');
     recordBtn.title = 'Record audio (Whisper transcription)';
+    importAudioBtn.classList.remove('disabled');
+    importAudioBtn.title = 'Import audio file';
   } else {
     recordBtn.title = 'Click to set up voice recording';
+    importAudioBtn.classList.add('disabled');
+    importAudioBtn.title = 'Set up OpenAI API key first';
   }
 }
 
@@ -515,7 +591,13 @@ recordBtn.addEventListener('click', async () => {
     openaiModal.classList.remove('hidden');
     return;
   }
-  
+
+  // If already recording, stop
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    stopRecording();
+    return;
+  }
+
   // Start recording
   try {
     const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -527,6 +609,68 @@ recordBtn.addEventListener('click', async () => {
     } else {
       alert('Could not access microphone: ' + err.message);
     }
+  }
+});
+
+importAudioBtn.addEventListener('click', async () => {
+  // If no OpenAI key, show the setup modal
+  if (!hasOpenAIKey) {
+    openaiModal.classList.remove('hidden');
+    return;
+  }
+  
+  // Show transcribing indicator
+  transcribingIndicator.classList.remove('hidden');
+  
+  try {
+    const result = await window.api.importAudio();
+    
+    if (result.canceled) {
+      // User canceled, just hide indicator
+      transcribingIndicator.classList.add('hidden');
+      return;
+    }
+    
+    if (result.success) {
+      // Check for gibberish/no intelligible voice
+      const text = result.text.trim();
+      const words = text.split(/\s+/);
+      const uniqueWords = new Set(words.map(w => w.toLowerCase()));
+      const isGibberish = (
+        text.length < 10 ||
+        (words.length > 3 && uniqueWords.size <= 2) ||
+        /^(you\s*)+$/i.test(text) ||
+        /^(the\s*)+$/i.test(text) ||
+        /^(a\s*)+$/i.test(text)
+      );
+      
+      if (isGibberish) {
+        alert('⚠️ No clear voice detected in the audio file.\n\nThe file may not contain speech or may have poor audio quality.');
+        return;
+      }
+      
+      // Append transcribed text to transcript
+      const currentText = transcript.value.trim();
+      if (currentText) {
+        transcript.value = currentText + '\n\n' + text;
+      } else {
+        transcript.value = text;
+      }
+      
+      // Save to session state
+      saveSessionState();
+    } else if (result.needsKey) {
+      hasOpenAIKey = false;
+      openaiModal.classList.remove('hidden');
+    } else {
+      alert('Import failed: ' + result.error);
+    }
+  } catch (err) {
+    console.error('Import error:', err);
+    alert('Failed to import audio: ' + err.message);
+  } finally {
+    // Hide transcribing indicator
+    transcribingIndicator.classList.add('hidden');
   }
 });
 
@@ -564,43 +708,19 @@ function startRecording(stream) {
   mediaRecorder.start(1000); // Collect data every second
   recordingStartTime = Date.now();
   
-  // Update UI
-  recordBtn.classList.add('hidden');
-  recordingIndicator.classList.remove('hidden');
-  
-  // Start timer
-  updateRecordingTime();
-  recordingTimer = setInterval(updateRecordingTime, 1000);
+  // Update UI — button turns red, text changes
+  recordBtn.classList.add('recording');
+  recordBtn.querySelector('.record-text').textContent = 'Stop';
 }
-
-function updateRecordingTime() {
-  if (!recordingStartTime) return;
-  
-  const elapsed = Math.floor((Date.now() - recordingStartTime) / 1000);
-  const minutes = Math.floor(elapsed / 60);
-  const seconds = elapsed % 60;
-  recordingTime.textContent = `${minutes}:${seconds.toString().padStart(2, '0')}`;
-}
-
-stopRecordBtn.addEventListener('click', () => {
-  stopRecording();
-});
 
 function stopRecording() {
   if (mediaRecorder && mediaRecorder.state !== 'inactive') {
     mediaRecorder.stop();
   }
-  
-  // Clear timer
-  if (recordingTimer) {
-    clearInterval(recordingTimer);
-    recordingTimer = null;
-  }
-  
-  // Reset UI
-  recordBtn.classList.remove('hidden');
-  recordingIndicator.classList.add('hidden');
-  recordingTime.textContent = '0:00';
+
+  // Reset UI — button back to normal
+  recordBtn.classList.remove('recording');
+  recordBtn.querySelector('.record-text').textContent = 'Record';
 }
 
 async function processRecording() {
@@ -682,8 +802,10 @@ async function processRecording() {
 
 generateBtn.addEventListener('click', async () => {
   const text = transcript.value.trim();
-  if (!text) {
-    alert('Please enter a transcript first.');
+  const session = getActiveSession();
+  const hasPdf = session && session.pdfAttachments && session.pdfAttachments.length > 0;
+  if (!text && !hasPdf) {
+    alert('Please enter a transcript or attach a PDF first.');
     return;
   }
   
@@ -692,24 +814,34 @@ generateBtn.addEventListener('click', async () => {
   generateBtn.disabled = true;
   
   try {
+    // Include PDF context if available
+    const pdfContext = (session && session.pdfAttachments && session.pdfAttachments.length > 0)
+      ? session.pdfAttachments.map(p => ({ fileName: p.fileName, text: p.text }))
+      : [];
+    
     const result = await window.api.generateNote({
       site: siteSelect.value,
       type: typeSelect.value,
-      transcript: text
+      transcript: text,
+      pdfContext
     });
     
     if (result.success) {
       displayOutput(result);
-      // Sync to Mac Mini (non-blocking)
-      const session = getActiveSession();
-      psSync.syncNote({
-        site: result.site,
-        noteType: result.type,
-        label: session?.label || null,
-        inputText: text,
-        outputText: result.content,
-        model: 'claude-sonnet-4-20250514'
-      });
+      // Sync to Mac Mini (non-blocking, silent)
+      try {
+        const session = getActiveSession();
+        psSync.syncNote({
+          site: result.site,
+          noteType: result.type,
+          label: session?.label || null,
+          inputText: text,
+          outputText: result.content,
+          model: 'claude-opus-4-6'
+        });
+      } catch (e) {
+        console.log('Sync unavailable:', e.message);
+      }
     } else {
       alert('Error: ' + result.error);
     }
@@ -811,27 +943,32 @@ function renderPdfAttachments() {
   const session = getActiveSession();
   if (!session) return;
   
-  if (session.pdfAttachments.length === 0) {
-    pdfAttachments.classList.add('hidden');
-    return;
-  }
+  const isEmpty = session.pdfAttachments.length === 0;
   
-  pdfAttachments.classList.remove('hidden');
-  pdfList.innerHTML = '';
+  // Update both display areas (refinement + input)
+  [pdfAttachments, pdfAttachmentsInput].forEach(container => {
+    if (!container) return;
+    if (isEmpty) { container.classList.add('hidden'); return; }
+    container.classList.remove('hidden');
+  });
   
-  session.pdfAttachments.forEach((pdf, idx) => {
-    const item = document.createElement('div');
-    item.className = 'pdf-item';
-    item.innerHTML = `
-      <span class="pdf-name" title="${pdf.numPages} page(s)">📄 ${pdf.fileName}</span>
-      <button class="pdf-remove" title="Remove" data-idx="${idx}">×</button>
-    `;
-    
-    item.querySelector('.pdf-remove').addEventListener('click', () => {
-      removePdfAttachment(idx);
+  if (isEmpty) return;
+  
+  [pdfList, pdfListInput].forEach(list => {
+    if (!list) return;
+    list.innerHTML = '';
+    session.pdfAttachments.forEach((pdf, idx) => {
+      const item = document.createElement('div');
+      item.className = 'pdf-item';
+      item.innerHTML = `
+        <span class="pdf-name" title="${pdf.numPages} page(s)">📄 ${pdf.fileName}</span>
+        <button class="pdf-remove" title="Remove" data-idx="${idx}">×</button>
+      `;
+      item.querySelector('.pdf-remove').addEventListener('click', () => {
+        removePdfAttachment(idx);
+      });
+      list.appendChild(item);
     });
-    
-    pdfList.appendChild(item);
   });
 }
 
@@ -843,7 +980,7 @@ function removePdfAttachment(idx) {
   renderPdfAttachments();
 }
 
-attachPdfBtn.addEventListener('click', async () => {
+async function handleAttachPdf() {
   const session = getActiveSession();
   if (!session) return;
   
@@ -882,7 +1019,10 @@ attachPdfBtn.addEventListener('click', async () => {
     };
     showSaveToLibraryToast();
   }
-});
+}
+
+attachPdfBtn.addEventListener('click', handleAttachPdf);
+attachPdfInputBtn.addEventListener('click', handleAttachPdf);
 
 // ============================================================
 // Guidelines Library

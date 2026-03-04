@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.openai.com; media-src 'self' blob:">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' https://api.openai.com http://192.168.0.84:*; media-src 'self' blob:">
   <title>Psych Scribe</title>
   <link rel="stylesheet" href="styles.css">
 </head>
@@ -100,15 +100,12 @@
                 </svg>
                 <span class="record-text">Record</span>
               </button>
-              <div id="recording-indicator" class="recording-indicator hidden">
-                <span class="recording-dot"></span>
-                <span class="recording-time" id="recording-time">0:00</span>
-                <button id="stop-record-btn" class="stop-record-btn" title="Stop recording">
-                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
-                    <rect x="6" y="6" width="12" height="12" rx="2"/>
-                  </svg>
-                </button>
-              </div>
+              <button id="import-audio-btn" class="import-audio-btn" title="Import audio file">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <path d="M9 16h6v-6h4l-7-7-7 7h4zm-4 2h14v2H5z"/>
+                </svg>
+                <span>Import</span>
+              </button>
             </div>
           </div>
           <textarea id="transcript" placeholder="Paste transcript, dictate with Wispr Flow, or click Record for built-in Whisper transcription"></textarea>
@@ -119,7 +116,14 @@
         </div>
       </section>
 
+      <!-- PDF Attachments Display (visible before and after generation) -->
+      <div id="pdf-attachments-input" class="pdf-attachments hidden">
+        <div class="pdf-attachments-label">📎 Attached documents:</div>
+        <div id="pdf-list-input" class="pdf-list"></div>
+      </div>
+
       <div class="action-bar">
+        <button id="attach-pdf-input-btn" class="secondary" title="Attach PDF for context">📎 Attach PDF</button>
         <button id="generate-btn" class="primary">Generate Note</button>
         <button id="clear-btn" class="secondary">Clear All</button>
       </div>
@@ -246,6 +250,13 @@
       <div class="spinner"></div>
       <span id="loading-text">Generating...</span>
     </div>
+  </div>
+
+  <div id="app-version" style="position: fixed; bottom: 6px; right: 12px; font-size: 11px; color: #999; pointer-events: none; z-index: 1;"></div>
+
+  <div id="update-banner" class="update-banner hidden">
+    <span id="update-message"></span>
+    <button id="update-btn" class="update-btn">Update Now</button>
   </div>
 
   <script src="sync.js"></script>

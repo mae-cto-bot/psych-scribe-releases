@@ -9,6 +9,7 @@ contextBridge.exposeInMainWorld('api', {
   checkOpenAIKey: () => ipcRenderer.invoke('check-openai-key'),
   saveOpenAIKey: (key) => ipcRenderer.invoke('save-openai-key', key),
   transcribeAudio: (audioData) => ipcRenderer.invoke('transcribe-audio', audioData),
+  importAudio: () => ipcRenderer.invoke('import-audio'),
   // PDF attachment
   attachPdf: () => ipcRenderer.invoke('attach-pdf'),
   // Guidelines Library
@@ -20,5 +21,13 @@ contextBridge.exposeInMainWorld('api', {
 
   // Sync
   getSyncConfig: () => ipcRenderer.invoke('get-sync-config'),
-  saveSyncConfig: (data) => ipcRenderer.invoke('save-sync-config', data)
+  saveSyncConfig: (data) => ipcRenderer.invoke('save-sync-config', data),
+
+  // App info
+  getVersion: () => ipcRenderer.invoke('get-version'),
+
+  // Auto-update
+  checkForUpdate: () => ipcRenderer.invoke('check-for-update'),
+  installUpdate: (data) => ipcRenderer.invoke('install-update', data),
+  onUpdateProgress: (callback) => ipcRenderer.on('update-progress', (event, status) => callback(status))
 });

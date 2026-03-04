@@ -66,5 +66,5 @@ class PsychScribeSync {
   }
 }
 
-// Singleton
-const psSync = new PsychScribeSync();
+// Singleton — use var so it's accessible across <script> tags
+var psSync = new PsychScribeSync();

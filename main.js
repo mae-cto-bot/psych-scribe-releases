@@ -2,6 +2,8 @@ const { app, BrowserWindow, ipcMain, dialog } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
+const https = require('https');
+const { execSync } = require('child_process');
 const Anthropic = require('@anthropic-ai/sdk');
 const OpenAI = require('openai');
 
@@ -306,6 +308,10 @@ ipcMain.handle('save-sync-config', async (event, { serverUrl, authToken, enabled
   }
 });
 
+ipcMain.handle('get-version', async () => {
+  return app.getVersion();
+});
+
 ipcMain.handle('generate-note', async (event, { site, type, transcript, pdfContext }) => {
   if (!anthropic) {
     return { success: false, error: 'API key not configured' };
@@ -502,7 +508,7 @@ function getPrompt(site, type, transcript) {
   // Shared style rules for all note types (v2.6.1)
   const sharedRules = `
 ABBREVIATION RULES (strict):
-- ALWAYS abbreviate: mg (never "milligram"), MDD (never "major depressive disorder"), ASD (never "autism spectrum disorder"), OCD (never "obsessive-compulsive disorder"), PTSD (never "post-traumatic stress disorder"), GAD (never "generalized anxiety disorder"), sx (symptoms), dx (diagnosis), tx (treatment)
+- ALWAYS abbreviate: mg (never "milligram"), MDD (never "major depressive disorder"), SUD (never "substance use disorder"), GAD (never "generalized anxiety disorder"), BPD (never "borderline personality disorder"), BPAD (never "bipolar affective disorder"), ASD (never "autism spectrum disorder"), OCD (never "obsessive-compulsive disorder"), PTSD (never "post-traumatic stress disorder"), sx (symptoms), dx (diagnosis), tx (treatment)
 - Schizophrenia: OK to write out
 - Standard ED/psych abbreviations: SI, HI, AVH, PES, Tx, Hx, Dx, Rx, Sx, Pt, c/o, r/o, s/p, w/, w/o, D/C, LOC, DTS/DTO, WNL, A&O, PRN, PO, IM
 
@@ -514,6 +520,8 @@ FORMATTING RULES:
 - NO bullet points or numbering
 - Use brief paragraphs
 - Maintain clinical objectivity — concise, natural, not robotic or overly polished
+- Write like a busy ED clinician, not a polished AI. Short sentences. No filler. No hedging language ("it is worth noting", "importantly", "notably"). No over-summarizing. If the transcript says it simply, say it simply.
+- NEVER spell out abbreviations that any ED clinician would know — use the short form always.
 - Dr. Jacqui (not Jackie)`;
 
   const unityRules = `
@@ -641,3 +649,126 @@ Output FOUR separate sections with these exact labels (the labels will be stripp
   const key = `${site}-${type}`;
   return prompts[key] || prompts['unity-new'];
 }
+
+// ============================================================
+// Auto-Update System (GitHub Releases)
+// ============================================================
+
+const UPDATE_REPO = 'mae-cto-bot/psych-scribe-releases';
+const UPDATE_API = `https://api.github.com/repos/${UPDATE_REPO}/releases/latest`;
+
+function compareVersions(current, latest) {
+  const c = current.replace(/^v/, '').split('.').map(Number);
+  const l = latest.replace(/^v/, '').split('.').map(Number);
+  for (let i = 0; i < 3; i++) {
+    if ((l[i] || 0) > (c[i] || 0)) return 1;
+    if ((l[i] || 0) < (c[i] || 0)) return -1;
+  }
+  return 0;
+}
+
+function httpsGet(url) {
+  return new Promise((resolve, reject) => {
+    const request = (reqUrl) => {
+      https.get(reqUrl, { headers: { 'User-Agent': 'PsychScribe' } }, (res) => {
+        if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+          request(res.headers.location);
+          return;
+        }
+        if (res.statusCode !== 200) {
+          reject(new Error(`HTTP ${res.statusCode}`));
+          return;
+        }
+        const chunks = [];
+        res.on('data', (chunk) => chunks.push(chunk));
+        res.on('end', () => resolve(Buffer.concat(chunks)));
+        res.on('error', reject);
+      }).on('error', reject);
+    };
+    request(url);
+  });
+}
+
+async function checkForUpdate() {
+  try {
+    const data = JSON.parse(await httpsGet(UPDATE_API));
+    const latestVersion = data.tag_name;
+    const currentVersion = app.getVersion();
+
+    if (compareVersions(currentVersion, latestVersion) > 0) {
+      const dmgAsset = data.assets.find(a => a.name.endsWith('.dmg'));
+      if (!dmgAsset) return null;
+      return {
+        version: latestVersion,
+        currentVersion,
+        downloadUrl: dmgAsset.browser_download_url,
+        size: dmgAsset.size,
+        notes: data.body || ''
+      };
+    }
+    return null;
+  } catch (e) {
+    console.log('Update check failed:', e.message);
+    return null;
+  }
+}
+
+async function installUpdate(downloadUrl, version) {
+  const tmpDir = os.tmpdir();
+  const dmgPath = path.join(tmpDir, `PsychScribe-${version}.dmg`);
+  const appName = 'Psych Scribe';
+  const dest = '/Applications';
+
+  // Download DMG
+  mainWindow.webContents.send('update-progress', 'downloading');
+  const dmgData = await httpsGet(downloadUrl);
+  fs.writeFileSync(dmgPath, dmgData);
+
+  // Mount DMG
+  mainWindow.webContents.send('update-progress', 'installing');
+  const mountOutput = execSync(`hdiutil attach "${dmgPath}" -nobrowse -quiet 2>&1 | grep "/Volumes" | awk -F'\\t' '{print $NF}' | head -1`, { encoding: 'utf8' }).trim();
+
+  if (!mountOutput) {
+    throw new Error('Failed to mount DMG');
+  }
+
+  try {
+    // Remove old app
+    const destApp = path.join(dest, `${appName}.app`);
+    if (fs.existsSync(destApp)) {
+      execSync(`rm -rf "${destApp}"`);
+    }
+
+    // Copy new app
+    execSync(`cp -R "${mountOutput}/${appName}.app" "${dest}/"`);
+
+    // Remove quarantine
+    execSync(`xattr -cr "${destApp}"`);
+  } finally {
+    // Unmount
+    try { execSync(`hdiutil detach "${mountOutput}" -quiet`); } catch (e) {}
+    // Clean up temp
+    try { fs.unlinkSync(dmgPath); } catch (e) {}
+  }
+
+  // Relaunch
+  mainWindow.webContents.send('update-progress', 'relaunching');
+  setTimeout(() => {
+    app.relaunch();
+    app.exit(0);
+  }, 500);
+}
+
+ipcMain.handle('check-for-update', async () => {
+  return await checkForUpdate();
+});
+
+ipcMain.handle('install-update', async (event, { downloadUrl, version }) => {
+  try {
+    await installUpdate(downloadUrl, version);
+    return { success: true };
+  } catch (e) {
+    console.error('Update failed:', e);
+    return { success: false, error: e.message };
+  }
+});
